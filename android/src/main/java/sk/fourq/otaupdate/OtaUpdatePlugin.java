@@ -79,6 +79,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     private String filename;
     private String checksum;
     private boolean canceled = false;
+    private long lastProgressValue = -1L;
 
     /**
      * Legacy plugin initialization for embedding v1. This method provides backwards compatibility.
@@ -203,6 +204,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      */
     private void executeDownload() {
         canceled = false;
+        lastProgressValue = -1;
 
         try {
             String dataDir = context.getApplicationInfo().dataDir + "/files/ota_update";
@@ -257,7 +259,11 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
                     Log.d(TAG, "Response code:" + response.code());
                     Log.d(TAG, "Download completed");
 
-                    onDownloadComplete(destination, fileUri);
+                    if(canceled) {
+                        Log.d(TAG, "Can't complete, process is canceled");
+                    } else {
+                        onDownloadComplete(destination, fileUri);
+                    }
                 }
             });
         } catch (Exception e) {
@@ -276,6 +282,10 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      * @param fileUri     Uri to file
      */
     private void onDownloadComplete(final String destination, final Uri fileUri) {
+        if(canceled) {
+            return;
+        }
+
         //DOWNLOAD IS COMPLETE, UNREGISTER RECEIVER AND CLOSE PROGRESS SINK
         final File downloadedFile = new File(destination);
         if (!downloadedFile.exists()) {
@@ -319,6 +329,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      */
     private void executeInstallation(Uri fileUri, File downloadedFile) {
         if(canceled) {
+            Log.d(TAG, "Can't install, process is canceled");
             return;
         }
         Intent intent;
@@ -339,7 +350,9 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
             //NOTE: We have to start intent before sending event to stream
             //if application tries to programatically terminate app it may produce race condition
             //and application may end before intent is dispatched
-            context.startActivity(intent);
+            if(!canceled) {
+                context.startActivity(intent);
+            }
             progressSink.success(Arrays.asList("" + OtaStatus.INSTALLING.ordinal(), ""));
             progressSink.endOfStream();
             progressSink = null;
@@ -386,10 +399,15 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
                     Bundle data = msg.getData();
                     if (data.containsKey(ERROR)) {
                         reportError(OtaStatus.DOWNLOAD_ERROR, data.getString(ERROR), null);
-                    } else {
+                    } else if(!canceled) {
                         long bytesDownloaded = data.getLong(BYTES_DOWNLOADED);
                         long bytesTotal = data.getLong(BYTES_TOTAL);
-                        progressSink.success(Arrays.asList("" + OtaStatus.DOWNLOADING.ordinal(), "" + ((bytesDownloaded * 100) / bytesTotal)));
+                        long tmp = ((bytesDownloaded * 100) / bytesTotal);
+
+                        if (lastProgressValue != tmp) {
+                            lastProgressValue = tmp;
+                            progressSink.success(Arrays.asList("" + OtaStatus.DOWNLOADING.ordinal(), "" + tmp));
+                        }
                     }
                 }
             }
@@ -417,7 +435,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     @Override
     public void onDownloadProgress(long bytesRead, long contentLength, boolean done) {
 
-        if (done || canceled) {
+        if (done) {
             Log.d(TAG, "Download is complete");
         } else {
             if (contentLength < 1) {
