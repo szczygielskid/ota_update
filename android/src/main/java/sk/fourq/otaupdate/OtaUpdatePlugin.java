@@ -417,7 +417,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     @Override
     public void onDownloadProgress(long bytesRead, long contentLength, boolean done) {
 
-        if (done) {
+        if (done || canceled) {
             Log.d(TAG, "Download is complete");
         } else {
             if (contentLength < 1) {
