@@ -7,8 +7,8 @@ import 'package:flutter/services.dart';
 /// On Android it downloads the file (with progress reporting) and triggers app installation intent.
 /// On iOS it opens safari with specified ipa url. (not yet functioning)
 class OtaUpdate {
-  static const EventChannel _progressChannel =
-      EventChannel('sk.fourq.ota_update');
+  static const MethodChannel _methodChannel = MethodChannel('sk.fourq.ota_update.methods');
+  static const EventChannel _progressChannel = EventChannel('sk.fourq.ota_update');
   Stream<OtaEvent>? _progressStream;
 
   /// Execute download and instalation of the plugin.
@@ -38,7 +38,7 @@ class OtaUpdate {
         final OtaEvent otaEvent = _toOtaEvent(event.cast<String>());
         controller.add(otaEvent);
         if (otaEvent.status != OtaStatus.DOWNLOADING) {
-          controller.close();
+          // controller.close();
         }
       }).onError((Object error) {
         if (error is PlatformException) {
@@ -48,6 +48,10 @@ class OtaUpdate {
       _progressStream = controller.stream;
     }
     return _progressStream!;
+  }
+
+  Future<void> cancelDownload() async {
+    _methodChannel.invokeMethod('callDownloadCancel');
   }
 
   OtaEvent _toOtaEvent(List<String?> event) {
@@ -71,6 +75,8 @@ class OtaEvent {
 enum OtaStatus {
   /// FILE IS BEING DOWNLOADED
   DOWNLOADING,
+
+  DOWNLOAD_CANCELED,
 
   /// INSTALLATION HAS BEEN TRIGGERED
   INSTALLING,

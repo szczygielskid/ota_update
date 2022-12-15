@@ -13,6 +13,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
+
+import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
@@ -21,6 +23,8 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware;
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.EventChannel;
+import io.flutter.plugin.common.MethodCall;
+import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.PluginRegistry;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -44,7 +48,8 @@ import java.util.Map;
  * OtaUpdatePlugin
  */
 @TargetApi(Build.VERSION_CODES.M)
-public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChannel.StreamHandler, PluginRegistry.RequestPermissionsResultListener, ProgressListener {
+public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChannel.StreamHandler,
+        PluginRegistry.RequestPermissionsResultListener, ProgressListener, MethodChannel.MethodCallHandler {
 
     //CONSTANTS
     private static final String BYTES_DOWNLOADED = "BYTES_DOWNLOADED";
@@ -57,6 +62,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     private static final String ARG_ANDROID_PROVIDER_AUTHORITY = "androidProviderAuthority";
     private static final String TAG = "FLUTTER OTA";
     private static final String DEFAULT_APK_NAME = "ota_update.apk";
+    private static final String CALL_DOWNLOAD_CANCEL = "callDownloadCancel";
 
     //BASIC PLUGIN STATE
     private Context context;
@@ -207,15 +213,15 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
                 if (!file.delete()) {
                     Log.e(TAG, "WARNING: unable to delete old apk file before starting OTA");
                 }
-            } else if (!file.getParentFile().exists()){
+            } else if (!file.getParentFile().exists()) {
                 if (!file.getParentFile().mkdirs()) {
                     reportError(OtaStatus.INTERNAL_ERROR, "unable to create ota_update folder in internal storage", null);
                 }
             }
 
             Log.d(TAG, "DOWNLOAD STARTING");
-            Request.Builder request = new Request.Builder()
-                    .url(downloadUrl);
+            Log.d(TAG, downloadUrl);
+            Request.Builder request = new Request.Builder().url(downloadUrl);
             if (headers != null) {
                 Iterator<String> jsonKeys = headers.keys();
                 while (jsonKeys.hasNext()) {
@@ -240,10 +246,14 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
                         BufferedSink sink = Okio.buffer(Okio.sink(file));
                         sink.writeAll(response.body().source());
                         sink.close();
-                    } catch (RuntimeException ex){
+                    } catch (RuntimeException ex) {
                         reportError(OtaStatus.DOWNLOAD_ERROR, ex.getMessage(), ex);
                         return;
                     }
+
+                    Log.d(TAG, "Response code:" + response.code());
+                    Log.d(TAG, "Download completed");
+
                     onDownloadComplete(destination, fileUri);
                 }
             });
@@ -254,7 +264,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
 
     /**
      * Download has been completed
-     *
+     * <p>
      * 1. Check if file exists
      * 2. If checksum was provided, compute downloaded file checksum and compare with provided value
      * 3. If checks above pass, trigger installation
@@ -297,7 +307,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
 
     /**
      * Execute installation
-     *
+     * <p>
      * For android API level >= 24 start intent for ACTION_INSTALL_PACKAGE (native installer)
      * For android API level < 24 start intent ACTION_VIEW (open file, android should prompt for installation)
      *
@@ -381,6 +391,9 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
         final EventChannel progressChannel = new EventChannel(messanger, "sk.fourq.ota_update");
         progressChannel.setStreamHandler(this);
 
+        final MethodChannel methodChannel = new MethodChannel(messanger, "sk.fourq.ota_update.methods");
+        methodChannel.setMethodCallHandler(this);
+
         client = new OkHttpClient.Builder()
                 .addNetworkInterceptor(new Interceptor() {
                     @NotNull
@@ -416,11 +429,47 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
         }
     }
 
+    private void downloadCancel() {
+        Log.d(TAG, "Cancel download");
+
+        for (Call call : client.dispatcher().queuedCalls()) {
+            call.cancel();
+        }
+
+        for (Call call : client.dispatcher().runningCalls()) {
+            call.cancel();
+        }
+
+        if (progressSink != null) {
+            progressSink.success(Arrays.asList("" + OtaStatus.DOWNLOAD_CANCELED.ordinal(), ""));
+            progressSink.endOfStream();
+            progressSink = null;
+
+            Log.d(TAG, "Canceled download");
+        }
+    }
+
+    @Override
+    public void onMethodCall(@NonNull MethodCall methodCall, @NonNull MethodChannel.Result result) {
+        Log.d(TAG, "Call method: " + methodCall.method);
+
+        switch (methodCall.method) {
+            case CALL_DOWNLOAD_CANCEL:
+                downloadCancel();
+
+                result.success(null);
+                break;
+            default:
+                Log.w(TAG, "Method not implemented");
+        }
+    }
+
     /**
      * All statuses reported by the plugin
      */
     private enum OtaStatus {
         DOWNLOADING,
+        DOWNLOAD_CANCELED,
         INSTALLING,
         ALREADY_RUNNING_ERROR,
         PERMISSION_NOT_GRANTED_ERROR,
