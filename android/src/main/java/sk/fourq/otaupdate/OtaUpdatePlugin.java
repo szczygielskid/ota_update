@@ -78,6 +78,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     private JSONObject headers;
     private String filename;
     private String checksum;
+    private boolean canceled = false;
 
     /**
      * Legacy plugin initialization for embedding v1. This method provides backwards compatibility.
@@ -201,6 +202,8 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      * or from onRequestPermissionsResult if user had to grant permissions.
      */
     private void executeDownload() {
+        canceled = false;
+
         try {
             String dataDir = context.getApplicationInfo().dataDir + "/files/ota_update";
             //PREPARE URLS
@@ -315,6 +318,9 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      * @param downloadedFile Downloaded file
      */
     private void executeInstallation(Uri fileUri, File downloadedFile) {
+        if(canceled) {
+            return;
+        }
         Intent intent;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             //AUTHORITY NEEDS TO BE THE SAME ALSO IN MANIFEST
@@ -431,6 +437,8 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
 
     private void downloadCancel() {
         Log.d(TAG, "Cancel download");
+
+        canceled = true;
 
         for (Call call : client.dispatcher().queuedCalls()) {
             call.cancel();
