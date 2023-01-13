@@ -3,8 +3,12 @@ package sk.fourq.otaupdate;
 import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentSender;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -18,6 +22,20 @@ import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
+
+import org.jetbrains.annotations.NotNull;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Map;
+
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.embedding.engine.plugins.activity.ActivityAware;
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
@@ -34,15 +52,6 @@ import okhttp3.Request;
 import okhttp3.Response;
 import okio.BufferedSink;
 import okio.Okio;
-import org.jetbrains.annotations.NotNull;
-import org.json.JSONException;
-import org.json.JSONObject;
-
-import java.io.File;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.Map;
 
 /**
  * OtaUpdatePlugin
@@ -63,6 +72,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     private static final String TAG = "FLUTTER OTA";
     private static final String DEFAULT_APK_NAME = "ota_update.apk";
     private static final String CALL_DOWNLOAD_CANCEL = "callDownloadCancel";
+    private static final String CALL_SILENT_INSTALL = "callSilentInstall";
 
     //BASIC PLUGIN STATE
     private Context context;
@@ -80,6 +90,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
     private String checksum;
     private boolean canceled = false;
     private long lastProgressValue = -1L;
+    private boolean silentInstall = false;
 
     /**
      * Legacy plugin initialization for embedding v1. This method provides backwards compatibility.
@@ -259,7 +270,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
                     Log.d(TAG, "Response code:" + response.code());
                     Log.d(TAG, "Download completed");
 
-                    if(canceled) {
+                    if (canceled) {
                         Log.d(TAG, "Can't complete, process is canceled");
                     } else {
                         onDownloadComplete(destination, fileUri);
@@ -282,7 +293,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      * @param fileUri     Uri to file
      */
     private void onDownloadComplete(final String destination, final Uri fileUri) {
-        if(canceled) {
+        if (canceled) {
             return;
         }
 
@@ -328,34 +339,55 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
      * @param downloadedFile Downloaded file
      */
     private void executeInstallation(Uri fileUri, File downloadedFile) {
-        if(canceled) {
+        if (canceled) {
             Log.d(TAG, "Can't install, process is canceled");
             return;
         }
-        Intent intent;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            //AUTHORITY NEEDS TO BE THE SAME ALSO IN MANIFEST
-            Uri apkUri = FileProvider.getUriForFile(context, androidProviderAuthority, downloadedFile);
-            intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
-            intent.setData(apkUri);
-            intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        } else {
-            intent = new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(fileUri, "application/vnd.android.package-archive");
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        }
-        //SEND INSTALLING EVENT
-        if (progressSink != null) {
-            //NOTE: We have to start intent before sending event to stream
-            //if application tries to programatically terminate app it may produce race condition
-            //and application may end before intent is dispatched
-            if(!canceled) {
-                context.startActivity(intent);
+        if (silentInstall) {
+            Log.d(TAG, "Use silent install");
+
+            try {
+                if (progressSink != null) {
+                    progressSink.success(Arrays.asList("" + OtaStatus.INSTALLING.ordinal(), ""));
+                    progressSink.endOfStream();
+                    progressSink = null;
+                }
+
+                installSilent(downloadedFile.getAbsolutePath());
+            } catch (IOException e) {
+                e.printStackTrace();
+
+                if (progressSink != null) {
+                    progressSink.success(Arrays.asList("" + OtaStatus.INTERNAL_ERROR.ordinal(), ""));
+                    progressSink.endOfStream();
+                    progressSink = null;
+                }
             }
-            progressSink.success(Arrays.asList("" + OtaStatus.INSTALLING.ordinal(), ""));
-            progressSink.endOfStream();
-            progressSink = null;
+        } else {
+            Log.d(TAG, "Use normal install");
+
+            Intent intent;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                //AUTHORITY NEEDS TO BE THE SAME ALSO IN MANIFEST
+                Uri apkUri = FileProvider.getUriForFile(context, androidProviderAuthority, downloadedFile);
+                intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+                intent.setData(apkUri);
+                intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            } else {
+                intent = new Intent(Intent.ACTION_VIEW);
+                intent.setDataAndType(fileUri, "application/vnd.android.package-archive");
+                intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            }
+            //SEND INSTALLING EVENT
+            if (progressSink != null) {
+                if (!canceled) {
+                    context.startActivity(intent);
+                }
+                progressSink.success(Arrays.asList("" + OtaStatus.INSTALLING.ordinal(), ""));
+                progressSink.endOfStream();
+                progressSink = null;
+            }
         }
     }
 
@@ -399,7 +431,7 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
                     Bundle data = msg.getData();
                     if (data.containsKey(ERROR)) {
                         reportError(OtaStatus.DOWNLOAD_ERROR, data.getString(ERROR), null);
-                    } else if(!canceled) {
+                    } else if (!canceled) {
                         long bytesDownloaded = data.getLong(BYTES_DOWNLOADED);
                         long bytesTotal = data.getLong(BYTES_TOTAL);
                         long tmp = ((bytesDownloaded * 100) / bytesTotal);
@@ -475,6 +507,100 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
         }
     }
 
+    private void installSilent(String fileUri) throws IOException {
+        Log.d(TAG, "Silent install");
+
+//        String packageName = context.getPackageName().replace(".dev", "").replace(".test", "");
+        String packageName = context.getPackageName();
+
+        Log.d(TAG, "Silent install - package: " + packageName);
+
+        PackageInstaller packageInstaller = context.getPackageManager().getPackageInstaller();
+
+        packageInstaller.registerSessionCallback(new PackageInstaller.SessionCallback() {
+            @Override
+            public void onCreated(int sessionid) {
+                Log.d(TAG, "Silent install - onCreated");
+            }
+
+            @Override
+            public void onBadgingChanged(int sessionId) {
+                Log.d(TAG, "Silent install - onBadgingChanged");
+            }
+
+            @Override
+            public void onActiveChanged(int sessionId, boolean active) {
+                Log.d(TAG, "Silent install - onActiveChanged " + active);
+            }
+
+            @Override
+            public void onProgressChanged(int sessionId, float progress) {
+                Log.d(TAG, "Silent install - onProgressChanged " + progress);
+            }
+
+            @Override
+            public void onFinished(int sessionid, boolean success) {
+                Log.d(TAG, "Silent install - onFinished");
+
+                if (success) {
+                    Log.d(TAG, "Silent install - onFinished: installation success");
+                } else {
+                    Log.d(TAG, "Silent install - onFinished: installation failed");
+                }
+            }
+        });
+
+        PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
+                PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+
+        params.setAppPackageName(packageName);
+
+        int sessionId = packageInstaller.createSession(params);
+        PackageInstaller.Session session = packageInstaller.openSession(sessionId);
+
+        Log.d(TAG, "Silent install - session created");
+
+        OutputStream out = session.openWrite(packageName, 0, -1);
+        if (fileUri.substring(0, 7).matches("file://")) {
+            fileUri = fileUri.substring(7);
+        }
+        File file = new File(fileUri);
+
+        Log.d(TAG, "Silent install - file: " + file.getAbsolutePath());
+
+        InputStream in = new FileInputStream(file);
+
+        byte[] buffer = new byte[65536];
+        int c;
+        while ((c = in.read(buffer)) != -1) {
+            out.write(buffer, 0, c);
+        }
+
+        session.fsync(out);
+        in.close();
+        out.close();
+
+        Log.d(TAG, "Silent install - before commit");
+
+        session.commit(createIntentSender(context, sessionId));
+        session.close();
+
+        Log.d(TAG, "Silent install - after commit");
+    }
+
+    private IntentSender createIntentSender(Context context, int sessionId) {
+        PackageManager pm = context.getPackageManager();
+        Intent launchIntent = pm.getLaunchIntentForPackage(context.getPackageName());
+//        Intent intent = new Intent(context, InstallReceiver.class);
+
+        PendingIntent pendingIntent = PendingIntent.getBroadcast(
+                context,
+                sessionId,
+                launchIntent,
+                0);
+        return pendingIntent.getIntentSender();
+    }
+
     @Override
     public void onMethodCall(@NonNull MethodCall methodCall, @NonNull MethodChannel.Result result) {
         Log.d(TAG, "Call method: " + methodCall.method);
@@ -482,6 +608,11 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
         switch (methodCall.method) {
             case CALL_DOWNLOAD_CANCEL:
                 downloadCancel();
+
+                result.success(null);
+                break;
+            case CALL_SILENT_INSTALL:
+                silentInstall = true;
 
                 result.success(null);
                 break;
@@ -503,4 +634,16 @@ public class OtaUpdatePlugin implements FlutterPlugin, ActivityAware, EventChann
         DOWNLOAD_ERROR,
         CHECKSUM_ERROR,
     }
+
+    static class InstallReceiver extends BroadcastReceiver  {
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1);
+
+            Log.d(TAG, "InstallReceiver - status: " + status);
+        }
+    }
 }
+
+

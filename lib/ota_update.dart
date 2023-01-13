@@ -54,6 +54,10 @@ class OtaUpdate {
     _methodChannel.invokeMethod('callDownloadCancel');
   }
 
+  Future<void> silentInstall() async {
+    _methodChannel.invokeMethod('callSilentInstall');
+  }
+
   OtaEvent _toOtaEvent(List<String?> event) {
     return OtaEvent(OtaStatus.values[int.parse(event[0]!)], event[1]);
   }
